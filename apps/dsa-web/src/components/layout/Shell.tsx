@@ -58,7 +58,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
       } catch { /* ignore */ }
     };
     load();
-    const t = setInterval(load, 30000);
+    const t = setInterval(load, 120000);
     return () => { active = false; clearInterval(t); };
   }, []);
 

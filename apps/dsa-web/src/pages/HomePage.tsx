@@ -59,7 +59,7 @@ const HomePage: React.FC = () => {
       } catch { /* ignore */ }
     };
     load();
-    const t = setInterval(load, 15000);
+    const t = setInterval(load, 60000);
     return () => { active = false; clearInterval(t); };
   }, []);
 

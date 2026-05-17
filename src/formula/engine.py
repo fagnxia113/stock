@@ -437,6 +437,91 @@ def _fn_not(args: List[pd.Series], **_) -> pd.Series:
     return (args[0] == 0).astype(float)
 
 
+def _fn_zig(args: List[pd.Series], **_) -> pd.Series:
+    if len(args) < 2:
+        raise ValueError("ZIG(data, pct) requires 2 arguments")
+    data = args[0]
+    pct = args[1]
+    pct_val = float(pct.iloc[-1]) if isinstance(pct, pd.Series) else float(pct)
+    values = data.values.astype(float)
+    n = len(values)
+    if n < 2:
+        return data.copy()
+    pivots = [0]
+    direction = 0
+    last_extreme_idx = 0
+    last_extreme_val = values[0]
+    for i in range(1, n):
+        if direction == 0:
+            change_pct = abs(values[i] - last_extreme_val) / max(abs(last_extreme_val), 1e-10) * 100
+            if change_pct >= pct_val:
+                direction = 1 if values[i] > last_extreme_val else -1
+                pivots.append(i)
+                last_extreme_idx = i
+                last_extreme_val = values[i]
+            elif (direction == 0 and values[i] > last_extreme_val) or (direction == 0 and values[i] < last_extreme_val):
+                if values[i] > last_extreme_val:
+                    last_extreme_idx = i
+                    last_extreme_val = values[i]
+                elif values[i] < last_extreme_val:
+                    last_extreme_idx = i
+                    last_extreme_val = values[i]
+        elif direction == 1:
+            if values[i] >= last_extreme_val:
+                last_extreme_idx = i
+                last_extreme_val = values[i]
+                pivots[-1] = i
+            else:
+                change_pct = (last_extreme_val - values[i]) / max(abs(last_extreme_val), 1e-10) * 100
+                if change_pct >= pct_val:
+                    direction = -1
+                    pivots.append(i)
+                    last_extreme_idx = i
+                    last_extreme_val = values[i]
+        elif direction == -1:
+            if values[i] <= last_extreme_val:
+                last_extreme_idx = i
+                last_extreme_val = values[i]
+                pivots[-1] = i
+            else:
+                change_pct = (values[i] - last_extreme_val) / max(abs(last_extreme_val), 1e-10) * 100
+                if change_pct >= pct_val:
+                    direction = 1
+                    pivots.append(i)
+                    last_extreme_idx = i
+                    last_extreme_val = values[i]
+    result = np.full(n, np.nan)
+    if len(pivots) >= 2:
+        pivot_set = sorted(set(pivots))
+        for idx in range(len(pivot_set)):
+            result[pivot_set[idx]] = values[pivot_set[idx]]
+        for idx in range(len(pivot_set) - 1):
+            start = pivot_set[idx]
+            end = pivot_set[idx + 1]
+            for j in range(start + 1, end):
+                ratio = (j - start) / (end - start)
+                result[j] = values[start] + ratio * (values[end] - values[start])
+    else:
+        result = values.copy()
+    return pd.Series(result, index=data.index)
+
+
+def _fn_dma(args: List[pd.Series], **_) -> pd.Series:
+    if len(args) != 2:
+        raise ValueError("DMA(x, a) requires 2 arguments")
+    x = args[0]
+    a = args[1]
+    a_vals = a.values if isinstance(a, pd.Series) else np.full(len(x), float(a))
+    x_vals = x.values.astype(float)
+    result = np.full(len(x), np.nan)
+    result[0] = x_vals[0]
+    for i in range(1, len(x)):
+        alpha = float(a_vals[i]) if i < len(a_vals) else float(a_vals[-1])
+        alpha = max(0.0, min(1.0, alpha))
+        result[i] = alpha * x_vals[i] + (1.0 - alpha) * result[i - 1]
+    return pd.Series(result, index=x.index)
+
+
 _BUILTIN_FUNCTIONS = {
     "MA": _fn_ma,
     "EMA": _fn_ema,
@@ -461,6 +546,8 @@ _BUILTIN_FUNCTIONS = {
     "EXIST": _fn_exist,
     "BETWEEN": _fn_between,
     "NOT": _fn_not,
+    "ZIG": _fn_zig,
+    "DMA": _fn_dma,
 }
 
 _STATEMENT_RE = re.compile(

@@ -162,7 +162,7 @@ const MarketPage: React.FC = () => {
       } catch { /* ignore */ }
     };
     load();
-    const t = setInterval(load, 10000);
+    const t = setInterval(load, 60000);
     return () => { active = false; clearInterval(t); };
   }, []);
 
@@ -373,7 +373,7 @@ const MarketPage: React.FC = () => {
           } catch { /* ignore */ }
         };
         poll();
-        realtimeTimers[timerKey] = setInterval(poll, 3000);
+        realtimeTimers[timerKey] = setInterval(poll, 30000);
       },
       unsubscribeBar: (params) => {
         const code = params.symbol.ticker || '600519';
@@ -523,7 +523,7 @@ const MarketPage: React.FC = () => {
       catch { if (active) setQuote(null); }
     };
     load();
-    const t = setInterval(load, 3000);
+    const t = setInterval(load, 30000);
     return () => { active = false; clearInterval(t); };
   }, [selectedCode]);
 
@@ -534,7 +534,7 @@ const MarketPage: React.FC = () => {
       catch { if (active) setOrderbook(null); }
     };
     load();
-    const t = setInterval(load, 5000);
+    const t = setInterval(load, 30000);
     return () => { active = false; clearInterval(t); };
   }, [selectedCode]);
 
@@ -545,7 +545,7 @@ const MarketPage: React.FC = () => {
       catch { if (active) setTicksData(null); }
     };
     load();
-    const t = setInterval(load, 5000);
+    const t = setInterval(load, 30000);
     return () => { active = false; clearInterval(t); };
   }, [selectedCode]);
 
@@ -559,7 +559,7 @@ const MarketPage: React.FC = () => {
       if (active) setQuotesMap(map);
     };
     loadAll();
-    const t = setInterval(loadAll, 30000);
+    const t = setInterval(loadAll, 60000);
     return () => { active = false; clearInterval(t); };
   }, [watchlist]);
 

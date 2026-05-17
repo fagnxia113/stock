@@ -38,7 +38,7 @@ export function useDashboardLifecycle({
 
     const intervalId = window.setInterval(() => {
       void refreshHistory(true);
-    }, 30_000);
+    }, 120_000);
 
     return () => window.clearInterval(intervalId);
   }, [enabled, refreshHistory]);
