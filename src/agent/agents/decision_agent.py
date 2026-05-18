@@ -47,6 +47,8 @@ Requirements:
 - Use Markdown when helpful
 - Keep the response practical and specific
 - Highlight the main signal, key reasoning, and major risks
+- Separate what is known, what is inferred, and what would invalidate the view
+- Provide a concrete watchlist of next conditions instead of vague optimism
 - Do NOT output JSON or code fences unless the user explicitly asks for them
 """
             if report_language == "en":
@@ -76,6 +78,15 @@ You will receive:
 
 Your task: synthesise all inputs into a single, actionable Decision Dashboard.
 {skills}
+## Professional Output Discipline
+- Separate evidence from inference. Do not treat news sentiment as fact.
+- Treat realtime quote / recent OHLCV / volume data as the highest-weight evidence.
+- If realtime quote is missing, stale, or conflicts with your draft, cap the decision at hold unless the user explicitly asks for a historical-only view.
+- Every final recommendation must include an invalidation condition.
+- If evidence is mixed or stale, choose "hold" and state what data would change it.
+- Never recommend chasing after a large short-term move unless pullback/volume confirmation is specified.
+- Position advice must be conditional and risk-first, not absolute.
+
 ## ⚠️ Long Chain-of-Thought Requirement
 Before producing the final JSON, you MUST think through the following steps \
 explicitly in your reasoning:
@@ -156,6 +167,18 @@ must include at minimum these top-level keys:
   stock_name, sentiment_score, trend_prediction, operation_advice,
   decision_type, confidence_level, dashboard, analysis_summary,
   key_points, risk_warning
+
+Also include these professional decision fields when possible:
+  evidence_summary, contradiction_summary, invalidation_conditions,
+  action_plan, position_plan, next_watchlist
+
+Suggested shape:
+  "evidence_summary": {"bullish": [], "bearish": [], "neutral": []}
+  "contradiction_summary": "How conflicting agent opinions were resolved"
+  "invalidation_conditions": ["specific price/data/event conditions"]
+  "action_plan": {"no_position": "...", "has_position": "..."}
+  "position_plan": {"initial": "...", "add": "...", "reduce": "...", "stop_loss": "..."}
+  "next_watchlist": ["what to check tomorrow or before acting"]
 
 Important: ``decision_type`` must stay within the existing enum
 ``buy|hold|sell``. Express stronger conviction via ``confidence_level``,
@@ -246,6 +269,38 @@ new decision_type values.
         if evidence_map and isinstance(evidence_map, dict):
             parts.append("## 🔍 Evidence Map from Debate")
             parts.append(json.dumps(evidence_map, ensure_ascii=False, indent=2)[:2000])
+            parts.append("")
+
+        evidence_pool = ctx.get_data("evidence_pool")
+        if evidence_pool and isinstance(evidence_pool, list):
+            parts.append("## Evidence Pool")
+            parts.append(
+                json.dumps(evidence_pool[:80], ensure_ascii=False, indent=2, default=str)[:6000]
+            )
+            parts.append(
+                "Use the evidence pool as the source of truth. Separate hard evidence, "
+                "soft evidence, contradictions, invalidation conditions, and watch items."
+            )
+            parts.append("")
+
+        decision_policy = ctx.get_data("decision_policy")
+        if decision_policy and isinstance(decision_policy, dict):
+            parts.append("## Rule-Based Decision Policy")
+            parts.append(json.dumps(decision_policy, ensure_ascii=False, indent=2, default=str)[:4000])
+            parts.append(
+                "Use this policy as a calibration anchor. You may disagree only if you "
+                "explicitly explain which evidence overrides the rule score."
+            )
+            parts.append("")
+
+        data_quality_summary = ctx.get_data("data_quality_summary")
+        if data_quality_summary and isinstance(data_quality_summary, dict):
+            parts.append("## Data Quality Summary")
+            parts.append(json.dumps(data_quality_summary, ensure_ascii=False, indent=2, default=str)[:2500])
+            parts.append(
+                "Hard market data has priority over model inference. If hard data is missing, "
+                "state the limitation and reduce confidence."
+            )
             parts.append("")
 
         thesis_breakers = ctx.get_data("thesis_breakers")

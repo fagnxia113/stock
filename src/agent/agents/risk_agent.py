@@ -22,6 +22,11 @@ from typing import Optional
 from src.agent.agents.base_agent import BaseAgent
 from src.agent.protocols import AgentContext, AgentOpinion
 from src.agent.runner import try_parse_json
+from src.agent.schemas import (
+    RiskOpinionPayload,
+    append_evidence_pool,
+    validate_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +67,8 @@ Return **only** a JSON object:
 {
   "risk_level": "high|medium|low|none",
   "risk_score": 0-100,
+  "bear_case": "the strongest evidence-backed argument against the trade",
+  "thesis_breakers": ["clear conditions that would invalidate any buy/hold thesis"],
   "flags": [
     {
       "category": "insider|earnings|regulatory|industry|lockup|valuation|technical",
@@ -97,6 +104,8 @@ from your search results. Do NOT invent risks.
         if parsed is None:
             logger.warning("[RiskAgent] failed to parse risk JSON")
             return None
+        parsed = validate_payload(RiskOpinionPayload, parsed)
+        append_evidence_pool(ctx, agent_name=self.agent_name, payload=parsed)
 
         # Propagate structured risk flags to context
         for flag in parsed.get("flags", []):
@@ -106,6 +115,10 @@ from your search results. Do NOT invent risks.
                     description=flag.get("description", ""),
                     severity=flag.get("severity", "medium"),
                 )
+
+        thesis_breakers = parsed.get("thesis_breakers")
+        if isinstance(thesis_breakers, list):
+            ctx.set_data("thesis_breakers", thesis_breakers)
 
         return AgentOpinion(
             agent_name=self.agent_name,

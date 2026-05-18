@@ -121,6 +121,7 @@ class BaseAgent(ABC):
 
             result.tokens_used = loop_result.total_tokens
             result.tool_calls_count = len(loop_result.tool_calls_log)
+            self._absorb_tool_outputs(ctx, loop_result.tool_calls_log)
             result.meta["raw_text"] = loop_result.content
             result.meta["models_used"] = loop_result.models_used
             result.meta["tool_calls_log"] = loop_result.tool_calls_log
@@ -200,6 +201,50 @@ class BaseAgent(ABC):
         if memory_context:
             parts.append(memory_context)
         return "\n\n".join(parts) if parts else ""
+
+    def _absorb_tool_outputs(self, ctx: AgentContext, tool_calls_log: List[Dict[str, Any]]) -> None:
+        """Persist compact tool outputs into shared context for downstream rules."""
+        if not tool_calls_log:
+            return
+
+        changed = False
+        for entry in tool_calls_log:
+            if not isinstance(entry, dict) or not entry.get("success"):
+                continue
+            payload = entry.get("result")
+            if not isinstance(payload, dict):
+                continue
+            tool_name = entry.get("tool")
+            if tool_name == "get_realtime_quote":
+                ctx.set_data("realtime_quote", payload)
+                if payload.get("name"):
+                    ctx.stock_name = str(payload["name"])
+                changed = True
+            elif tool_name == "get_daily_history":
+                ctx.set_data("daily_history", payload)
+                changed = True
+            elif tool_name == "analyze_trend":
+                ctx.set_data("trend_result", payload)
+                changed = True
+            elif tool_name == "get_chip_distribution":
+                ctx.set_data("chip_distribution", payload)
+                changed = True
+            elif tool_name == "get_stock_info":
+                ctx.set_data("stock_info", payload)
+                if isinstance(payload.get("fundamental_context"), dict):
+                    ctx.set_data("fundamental_context", payload["fundamental_context"])
+                changed = True
+            elif tool_name == "get_capital_flow":
+                ctx.set_data("capital_flow_context", payload)
+                changed = True
+
+        if changed:
+            try:
+                from src.agent.data_confidence import build_context_quality_summary
+
+                ctx.set_data("data_quality_summary", build_context_quality_summary(ctx.data))
+            except Exception:
+                logger.debug("[%s] data quality summary refresh failed", self.agent_name, exc_info=True)
 
     def _filtered_registry(self) -> ToolRegistry:
         """Return a ToolRegistry restricted to ``self.tool_names``.

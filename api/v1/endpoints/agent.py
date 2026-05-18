@@ -270,10 +270,10 @@ async def send_chat_to_notification(request: SendChatRequest):
     return {"success": True}
 
 
-def _build_executor(config, skills: Optional[List[str]] = None):
+def _build_executor(config, skills: Optional[List[str]] = None, event_bus=None):
     """Build and return a configured AgentExecutor (sync helper)."""
     from src.agent.factory import build_agent_executor
-    return build_agent_executor(config, skills=skills)
+    return build_agent_executor(config, skills=skills, event_bus=event_bus)
 
 
 async def _run_research_in_background(
@@ -389,6 +389,21 @@ async def agent_chat_stream(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
+    from src.agent.analysis_stream import AnalysisEventBus, AnalysisStreamEvent
+
+    event_bus = AnalysisEventBus()
+
+    def _on_agent_event(event: AnalysisStreamEvent):
+        payload = event.to_dict()
+        flattened = {
+            "type": payload["event_type"],
+            "event_id": payload["event_id"],
+            "timestamp": payload["timestamp"],
+            **payload["data"],
+        }
+        asyncio.run_coroutine_threadsafe(queue.put(flattened), loop)
+
+    event_bus.subscribe(_on_agent_event)
 
     # Pass explicit skills into context for the orchestrator.
     # Direct assignment so caller-provided skills always take precedence.
@@ -406,7 +421,7 @@ async def agent_chat_stream(request: ChatRequest):
 
     def run_sync():
         try:
-            executor = _build_executor(config, skills or None)
+            executor = _build_executor(config, skills or None, event_bus=event_bus)
             result = executor.chat(
                 message=request.message,
                 session_id=session_id,
@@ -430,6 +445,8 @@ async def agent_chat_stream(request: ChatRequest):
                 queue.put({"type": "error", "message": str(exc)}),
                 loop,
             )
+        finally:
+            event_bus.unsubscribe(_on_agent_event)
 
     async def event_generator():
         # Start executor in a thread so we don't block the event loop

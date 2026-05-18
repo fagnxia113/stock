@@ -14,6 +14,7 @@ from datetime import date
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.agent.data_confidence import assess_payload, utc_now_iso
 from src.agent.tools.registry import ToolParameter, ToolDefinition
 
 logger = logging.getLogger(__name__)
@@ -236,14 +237,24 @@ def _handle_get_realtime_quote(stock_code: str) -> dict:
     """Get real-time stock quote."""
     manager = _get_fetcher_manager()
     quote = manager.get_realtime_quote(stock_code)
+    collected_at = utc_now_iso()
     if quote is None:
         return {
             "error": f"No realtime quote available for {stock_code}",
             "retriable": False,
             "note": "All data sources unavailable (network or circuit-breaker). Skip this tool and proceed with historical data only.",
+            "collected_at": collected_at,
+            "data_quality": {
+                "source_type": "realtime",
+                "source": "missing",
+                "as_of": collected_at,
+                "freshness_seconds": 0,
+                "is_stale": True,
+                "trust_score": 0.0,
+            },
         }
 
-    return {
+    result = {
         "code": quote.code,
         "name": quote.name,
         "price": quote.price,
@@ -264,7 +275,15 @@ def _handle_get_realtime_quote(stock_code: str) -> dict:
         "circ_mv": quote.circ_mv,
         "change_60d": quote.change_60d,
         "source": quote.source.value if hasattr(quote.source, 'value') else str(quote.source),
+        "collected_at": collected_at,
     }
+    result["data_quality"] = assess_payload(
+        result,
+        source_type="realtime",
+        source=result.get("source"),
+        as_of=collected_at,
+    )
+    return result
 
 
 get_realtime_quote_tool = ToolDefinition(
@@ -328,7 +347,7 @@ def _handle_get_daily_history(stock_code: str, days: int = 60) -> dict:
     if source == "db_cache" and records:
         response_code = records[-1].get("code") or response_code
 
-    return _append_history_metadata({
+    result = {
         "code": response_code,
         "source": source,
         "cache_hit": source == "db_cache",
@@ -338,7 +357,16 @@ def _handle_get_daily_history(stock_code: str, days: int = 60) -> dict:
         "partial_cache": source == "db_cache" and len(records) < effective_days,
         "total_records": len(records),
         "data": records,
-    }, metadata)
+        "collected_at": utc_now_iso(),
+    }
+    result["data_quality"] = assess_payload(
+        result,
+        source_type="history",
+        source=source,
+        as_of=result["collected_at"],
+        stale=bool(result["partial_cache"]),
+    )
+    return _append_history_metadata(result, metadata)
 
 
 get_daily_history_tool = ToolDefinition(
@@ -376,7 +404,7 @@ def _handle_get_chip_distribution(stock_code: str) -> dict:
     if chip is None:
         return {"error": f"No chip distribution data available for {stock_code}"}
 
-    return {
+    result = {
         "code": chip.code,
         "date": chip.date,
         "source": chip.source,
@@ -388,7 +416,15 @@ def _handle_get_chip_distribution(stock_code: str) -> dict:
         "cost_70_low": chip.cost_70_low,
         "cost_70_high": chip.cost_70_high,
         "concentration_70": chip.concentration_70,
+        "collected_at": utc_now_iso(),
     }
+    result["data_quality"] = assess_payload(
+        result,
+        source_type="technical",
+        source=result.get("source"),
+        as_of=result["collected_at"],
+    )
+    return result
 
 
 get_chip_distribution_tool = ToolDefinition(
@@ -473,7 +509,7 @@ def _handle_get_stock_info(stock_code: str) -> dict:
     except Exception:
         pass
 
-    return {
+    result = {
         "code": stock_code.upper(),
         "name": stock_name,
         "pe_ratio": valuation.get("pe_ratio"),
@@ -486,7 +522,17 @@ def _handle_get_stock_info(stock_code: str) -> dict:
         # Planned for future deprecation in a major version.
         "boards": belong_boards,
         "sector_rankings": sector_rankings,
+        "collected_at": utc_now_iso(),
     }
+    result["data_quality"] = assess_payload(
+        result,
+        source_type="fundamental",
+        source="fundamental_context",
+        as_of=result["collected_at"],
+    )
+    if isinstance(result.get("fundamental_context"), dict):
+        result["fundamental_context"]["data_quality"] = result["data_quality"]
+    return result
 
 
 get_stock_info_tool = ToolDefinition(
@@ -638,18 +684,36 @@ def _handle_get_capital_flow(stock_code: str) -> dict:
         ctx = manager.get_capital_flow_context(stock_code)
     except Exception as exc:
         logger.warning("get_capital_flow failed for %s: %s", stock_code, exc)
+        collected_at = utc_now_iso()
         return {
             "stock_code": stock_code,
             "status": "error",
             "error": f"capital flow fetch failed: {exc}",
+            "collected_at": collected_at,
+            "data_quality": assess_payload(
+                {"source": "capital_flow", "collected_at": collected_at},
+                source_type="capital_flow",
+                source="capital_flow",
+                as_of=collected_at,
+                stale=True,
+            ),
         }
 
     status = ctx.get("status", "not_supported")
     if status == "not_supported":
+        collected_at = utc_now_iso()
         return {
             "stock_code": stock_code,
             "status": "not_supported",
             "note": "Capital flow data is only available for A-share stocks (not ETFs/indices).",
+            "collected_at": collected_at,
+            "data_quality": assess_payload(
+                {"source": "capital_flow", "collected_at": collected_at},
+                source_type="capital_flow",
+                source="capital_flow",
+                as_of=collected_at,
+                stale=True,
+            ),
         }
 
     data = ctx.get("data", {})
@@ -657,7 +721,7 @@ def _handle_get_capital_flow(stock_code: str) -> dict:
     sector_rankings = data.get("sector_rankings") or {}
     errors = ctx.get("errors") or []
 
-    return {
+    result = {
         "stock_code": stock_code,
         "status": status,
         "main_net_inflow": stock_flow.get("main_net_inflow"),
@@ -668,7 +732,15 @@ def _handle_get_capital_flow(stock_code: str) -> dict:
             "top_outflow_sectors": sector_rankings.get("bottom", [])[:3],
         },
         "errors": errors,
+        "collected_at": utc_now_iso(),
     }
+    result["data_quality"] = assess_payload(
+        result,
+        source_type="capital_flow",
+        source="capital_flow",
+        as_of=result["collected_at"],
+    )
+    return result
 
 
 get_capital_flow_tool = ToolDefinition(

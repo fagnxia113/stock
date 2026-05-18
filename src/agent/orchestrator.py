@@ -32,6 +32,9 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
+from src.agent.data_confidence import build_context_quality_summary
+from src.agent.decision_policy import build_decision_policy
+from src.agent.hallucination_guard import apply_hallucination_guard
 from src.agent.llm_adapter import LLMToolAdapter
 from src.agent.protocols import (
     AgentContext,
@@ -262,7 +265,13 @@ class AgentOrchestrator:
         timeout_seconds: Optional[float] = None,
     ) -> StageResult:
         """Run a stage agent while preserving compatibility with older call signatures."""
-        run_kwargs = {"progress_callback": progress_callback}
+        stage_progress_callback = progress_callback
+        if self.event_bus:
+            stage_progress_callback = self._build_stage_progress_callback(
+                agent.agent_name,
+                progress_callback,
+            )
+        run_kwargs = {"progress_callback": stage_progress_callback}
         if (
             timeout_seconds is not None
             and timeout_seconds > 0
@@ -270,6 +279,46 @@ class AgentOrchestrator:
         ):
             run_kwargs["timeout_seconds"] = timeout_seconds
         return agent.run(ctx, **run_kwargs)
+
+    def _build_stage_progress_callback(
+        self,
+        agent_name: str,
+        progress_callback: Optional[Callable],
+    ) -> Callable[[Dict[str, Any]], None]:
+        """Mirror low-level ReAct progress into the structured analysis event bus."""
+
+        def _callback(event: Dict[str, Any]) -> None:
+            if progress_callback:
+                progress_callback(event)
+
+            event_type = event.get("type")
+            if event_type == "thinking":
+                message = event.get("message") or event.get("display_name") or ""
+                if message:
+                    self.event_bus.emit_thinking(
+                        agent_name=agent_name,
+                        thinking=str(message),
+                        step=int(event.get("step") or 0),
+                    )
+            elif event_type == "tool_start":
+                self.event_bus.emit_tool_call(
+                    agent_name=agent_name,
+                    tool_name=str(event.get("tool") or ""),
+                    arguments=event.get("arguments") if isinstance(event.get("arguments"), dict) else {},
+                    step=int(event.get("step") or 0),
+                )
+            elif event_type == "tool_done":
+                self.event_bus.emit_tool_result(
+                    agent_name=agent_name,
+                    tool_name=str(event.get("tool") or ""),
+                    result_summary=(
+                        "完成" if event.get("success", True) else "失败"
+                    ),
+                    success=bool(event.get("success", True)),
+                    duration=float(event.get("duration") or 0),
+                )
+
+        return _callback
 
     # -----------------------------------------------------------------
     # Public interface (mirrors AgentExecutor)
@@ -471,6 +520,9 @@ class AgentOrchestrator:
             if agent.agent_name == "decision" and getattr(self, "_skill_agent_names", None):
                 self._aggregate_skill_opinions(ctx)
 
+            if agent.agent_name == "decision":
+                self._refresh_decision_policy(ctx)
+
             if progress_callback:
                 progress_callback({
                     "type": "stage_start",
@@ -551,6 +603,7 @@ class AgentOrchestrator:
                         signal=last_opinion.signal,
                         confidence=last_opinion.confidence,
                         reasoning=last_opinion.reasoning,
+                        raw_data=last_opinion.raw_data,
                     )
                 if agent.agent_name == "devils_advocate":
                     audit = ctx.get_data("devils_advocate_audit")
@@ -720,11 +773,34 @@ class AgentOrchestrator:
         if evidence_map and isinstance(evidence_map, dict):
             result["evidence_map"] = evidence_map
 
+        evidence_pool = ctx.get_data("evidence_pool")
+        if evidence_pool and isinstance(evidence_pool, list):
+            result["evidence_pool"] = evidence_pool[:120]
+
+        decision_policy = ctx.get_data("decision_policy")
+        if decision_policy and isinstance(decision_policy, dict):
+            result["decision_policy"] = decision_policy
+
+        data_quality_summary = ctx.get_data("data_quality_summary")
+        if data_quality_summary and isinstance(data_quality_summary, dict):
+            result["data_quality_summary"] = data_quality_summary
+
+        final_dashboard = ctx.get_data("final_dashboard")
+        if isinstance(final_dashboard, dict) and isinstance(final_dashboard.get("hallucination_guard"), dict):
+            result["hallucination_guard"] = final_dashboard["hallucination_guard"]
+
         thesis_breakers = ctx.get_data("thesis_breakers")
         if thesis_breakers and isinstance(thesis_breakers, list):
             result["thesis_breakers"] = thesis_breakers
 
         return result
+
+    @staticmethod
+    def _refresh_decision_policy(ctx: AgentContext) -> Dict[str, Any]:
+        """Refresh the rule-based pre-decision stored in the shared context."""
+        policy = build_decision_policy(ctx)
+        ctx.set_data("decision_policy", policy)
+        return policy
 
     def _build_agent_chain(self, ctx: AgentContext) -> list:
         """Instantiate the ordered agent list based on ``self.mode``."""
@@ -882,6 +958,8 @@ class AgentOrchestrator:
                              "trend_result", "news_context"):
                 if context.get(data_key):
                     ctx.set_data(data_key, context[data_key])
+            if ctx.data:
+                ctx.set_data("data_quality_summary", build_context_quality_summary(ctx.data))
 
         # Try to extract stock code from the query text
         if not ctx.stock_code:
@@ -921,6 +999,9 @@ class AgentOrchestrator:
         3. Synthesised dashboard from completed opinions
         4. Plaintext fallback summary
         """
+        if ctx.opinions and not isinstance(ctx.get_data("decision_policy"), dict):
+            self._refresh_decision_policy(ctx)
+
         final_dashboard = ctx.get_data("final_dashboard")
         final_raw = ctx.get_data("final_dashboard_raw")
         final_text = ctx.get_data("final_response_text")
@@ -968,6 +1049,7 @@ class AgentOrchestrator:
         if dashboard is None:
             return None
 
+        dashboard = apply_hallucination_guard(ctx, dashboard)
         ctx.set_data("final_dashboard", dashboard)
         # Apply risk override (idempotent — safe to call even if already
         # applied in _execute_pipeline after the decision stage).
@@ -997,11 +1079,24 @@ class AgentOrchestrator:
         if not payload and not ctx.opinions and not has_meaningful_context:
             return None
 
+        decision_policy = ctx.get_data("decision_policy")
+        if not isinstance(decision_policy, dict):
+            decision_policy = {}
+
         base_opinion = self._select_base_opinion(ctx)
+        policy_signal = decision_policy.get("adjusted_signal") or decision_policy.get("base_signal")
         decision_type = normalize_decision_signal(
-            payload.get("decision_type") or (base_opinion.signal if base_opinion else "hold")
+            payload.get("decision_type") or policy_signal or (base_opinion.signal if base_opinion else "hold")
         )
-        confidence = float(base_opinion.confidence if base_opinion is not None else 0.5)
+        raw_confidence = (
+            base_opinion.confidence
+            if base_opinion is not None
+            else decision_policy.get("confidence", 0.5)
+        )
+        try:
+            confidence = float(raw_confidence)
+        except (TypeError, ValueError):
+            confidence = 0.5
         sentiment_score = payload.get("sentiment_score")
         try:
             sentiment_score = int(sentiment_score)
@@ -1170,6 +1265,35 @@ class AgentOrchestrator:
                 for op in ctx.opinions
                 if isinstance(op.reasoning, str) and op.reasoning.strip()
             ][:5]
+
+        evidence_summary = payload.get("evidence_summary")
+        if not isinstance(evidence_summary, dict):
+            evidence_summary = {}
+        evidence_summary.setdefault("bullish", decision_policy.get("bullish_evidence", [])[:6])
+        evidence_summary.setdefault("bearish", decision_policy.get("bearish_evidence", [])[:6])
+        evidence_summary.setdefault("risk", decision_policy.get("risk_evidence", [])[:6])
+        if any(evidence_summary.values()):
+            payload["evidence_summary"] = evidence_summary
+
+        if not payload.get("contradiction_summary") and decision_policy.get("contradictions"):
+            payload["contradiction_summary"] = " / ".join(decision_policy.get("contradictions", [])[:3])
+        if not payload.get("invalidation_conditions") and decision_policy.get("invalidation_conditions"):
+            payload["invalidation_conditions"] = decision_policy.get("invalidation_conditions", [])[:8]
+        if not payload.get("next_watchlist") and decision_policy.get("watch_items"):
+            payload["next_watchlist"] = decision_policy.get("watch_items", [])[:8]
+        if not isinstance(payload.get("action_plan"), dict) and decision_policy:
+            payload["action_plan"] = {
+                "no_position": position_advice["no_position"],
+                "has_position": position_advice["has_position"],
+                "decision_policy": decision_policy.get("rationale", ""),
+            }
+        if not isinstance(payload.get("position_plan"), dict) and decision_policy:
+            payload["position_plan"] = {
+                "initial": _default_position_size(decision_type),
+                "add": "Only add after price and volume confirm the thesis.",
+                "reduce": "Reduce if risk flags increase or invalidation conditions trigger.",
+                "stop_loss": sniper.get("stop_loss", "N/A"),
+            }
 
         risk_warning = _first_non_empty_text(
             payload.get("risk_warning"),

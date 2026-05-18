@@ -19,6 +19,11 @@ from typing import Optional
 from src.agent.agents.base_agent import BaseAgent
 from src.agent.protocols import AgentContext, AgentOpinion
 from src.agent.runner import try_parse_json
+from src.agent.schemas import (
+    CapitalFlowOpinionPayload,
+    append_evidence_pool,
+    validate_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +112,8 @@ Return **only** a JSON object (no markdown fences):
         if parsed is None:
             logger.warning("[CapitalFlowAgent] failed to parse opinion JSON")
             return None
+        parsed = validate_payload(CapitalFlowOpinionPayload, parsed)
+        append_evidence_pool(ctx, agent_name=self.agent_name, payload=parsed)
 
         ctx.set_data("capital_flow_opinion", parsed)
 

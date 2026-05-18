@@ -82,6 +82,34 @@ interface ToolNode {
   phaseId: PhaseId;
 }
 
+interface AgentNode {
+  agentName: string;
+  displayName: string;
+  status: NodeStatus;
+  signal?: string;
+  confidence?: number;
+  reasoning?: string;
+  evidence: string[];
+  risks: string[];
+  invalidation: string[];
+  thinking: string[];
+}
+
+const AGENT_DISPLAY: Record<string, string> = {
+  technical: '技术面 Agent',
+  intel: '情报 Agent',
+  risk: '风险 Agent',
+  industry: '行业 Agent',
+  capital_flow: '资金 Agent',
+  fundamental: '基本面 Agent',
+  sentiment: '情绪 Agent',
+  devils_advocate: '反方审计 Agent',
+  debate: '辩论 Agent',
+  scenario_analysis: '情景 Agent',
+  factor_scoring: '因子 Agent',
+  decision: '决策 Agent',
+};
+
 function getPhaseForTool(toolName: string): PhaseId {
   if (toolName === 'sequential_thinking') {
     return 'conclude';
@@ -95,10 +123,11 @@ function getPhaseForTool(toolName: string): PhaseId {
 function buildNodes(steps: ProgressStep[]): ToolNode[] {
   const nodes: ToolNode[] = [];
   const seen = new Map<string, number>();
+  const hasClassicToolEvents = steps.some((s) => s.type === 'tool_start' || s.type === 'tool_done');
 
   for (const step of steps) {
-    if (step.type === 'tool_start') {
-      const tool = step.tool || '';
+    if (step.type === 'tool_start' || (!hasClassicToolEvents && step.type === 'agent_tool_call')) {
+      const tool = step.tool || step.tool_name || '';
       if (!ALL_PHASE_TOOLS.has(tool) && tool !== 'sequential_thinking') continue;
       const idx = seen.get(tool) ?? 0;
       seen.set(tool, idx + 1);
@@ -109,8 +138,8 @@ function buildNodes(steps: ProgressStep[]): ToolNode[] {
         status: 'running',
         phaseId: getPhaseForTool(tool),
       });
-    } else if (step.type === 'tool_done') {
-      const tool = step.tool || '';
+    } else if (step.type === 'tool_done' || (!hasClassicToolEvents && step.type === 'agent_tool_result')) {
+      const tool = step.tool || step.tool_name || '';
       if (!ALL_PHASE_TOOLS.has(tool) && tool !== 'sequential_thinking') continue;
       let runningIdx = -1;
       for (let i = nodes.length - 1; i >= 0; i--) {
@@ -128,6 +157,80 @@ function buildNodes(steps: ProgressStep[]): ToolNode[] {
   }
 
   return nodes;
+}
+
+function buildAgentNodes(steps: ProgressStep[]): AgentNode[] {
+  const agents: AgentNode[] = [];
+
+  const ensureAgent = (agentName: string, displayName?: string) => {
+    let agent = agents.find((a) => a.agentName === agentName);
+    if (!agent) {
+      agent = {
+        agentName,
+        displayName: displayName || AGENT_DISPLAY[agentName] || agentName,
+        status: 'running',
+        evidence: [],
+        risks: [],
+        invalidation: [],
+        thinking: [],
+      };
+      agents.push(agent);
+    } else if (displayName && agent.displayName === agent.agentName) {
+      agent.displayName = displayName;
+    }
+    return agent;
+  };
+
+  for (const step of steps) {
+    const agentName = step.agent_name || step.stage || '';
+    if (!agentName) continue;
+
+    if (step.type === 'agent_start' || step.type === 'stage_start') {
+      ensureAgent(agentName, step.display_name);
+    } else if (step.type === 'agent_thinking') {
+      const agent = ensureAgent(agentName, step.display_name);
+      const thinking = step.thinking || step.message || '';
+      if (thinking) {
+        agent.thinking.push(thinking);
+      }
+    } else if (step.type === 'agent_opinion') {
+      const agent = ensureAgent(agentName, step.display_name);
+      agent.status = 'done';
+      agent.signal = step.signal;
+      agent.confidence = step.confidence;
+      agent.reasoning = step.reasoning;
+      const rawData = step.raw_data || {};
+      agent.evidence = pickStringList(rawData, ['evidence', 'positive_catalysts', 'key_observations', 'key_strengths']);
+      agent.risks = pickStringList(rawData, ['risks', 'risk_alerts', 'key_concerns']);
+      agent.invalidation = pickStringList(rawData, ['invalid_if', 'thesis_breakers', 'watch_items']);
+    } else if (step.type === 'stage_done') {
+      const agent = ensureAgent(agentName, step.display_name);
+      agent.status = step.success === false || step.status === 'failed' ? 'failed' : 'done';
+    }
+  }
+
+  return agents;
+}
+
+function pickStringList(rawData: Record<string, unknown>, keys: string[]): string[] {
+  const result: string[] = [];
+  for (const key of keys) {
+    const value = rawData[key];
+    if (!Array.isArray(value)) continue;
+    for (const item of value) {
+      if (typeof item === 'string' && item.trim()) {
+        result.push(item.trim());
+      } else if (item && typeof item === 'object') {
+        const record = item as Record<string, unknown>;
+        const text = record.claim || record.title || record.description;
+        if (typeof text === 'string' && text.trim()) {
+          result.push(text.trim());
+        }
+      }
+      if (result.length >= 3) return result;
+    }
+  }
+  return result;
 }
 
 function getPhaseStatus(nodes: ToolNode[], phaseId: PhaseId): NodeStatus {
@@ -232,6 +335,7 @@ const ResearchPathView: React.FC<ResearchPathViewProps> = ({ steps, isGenerating
   const prevStepCountRef = useRef(0);
 
   const nodes = buildNodes(steps);
+  const agents = buildAgentNodes(steps);
 
   const activePhaseIdx = PHASES.findIndex((phase) => {
     const s = getPhaseStatus(nodes, phase.id);
@@ -264,6 +368,59 @@ const ResearchPathView: React.FC<ResearchPathViewProps> = ({ steps, isGenerating
         <span>研究路径</span>
         {isGenerating && <span className="research-path-generating-badge">生成中</span>}
       </div>
+
+      {agents.length > 0 && (
+        <div className="mb-3 space-y-1.5">
+          {agents.map((agent) => (
+            <div key={agent.agentName} className={`rounded-sm border px-2 py-1.5 ${
+              agent.status === 'running'
+                ? 'border-primary/30 bg-primary/5'
+                : agent.status === 'failed'
+                  ? 'border-red-400/30 bg-red-500/5'
+                  : 'border-border bg-surface/40'
+            }`}>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${
+                    agent.status === 'running'
+                      ? 'bg-primary animate-pulse'
+                      : agent.status === 'failed'
+                        ? 'bg-red-400'
+                        : 'bg-emerald-400'
+                  }`} />
+                  <span className="truncate text-[11px] font-medium text-foreground">{agent.displayName}</span>
+                </div>
+                {agent.signal && (
+                  <span className="flex-shrink-0 text-[10px] text-muted-text">
+                    {agent.signal}{agent.confidence != null ? ` · ${(agent.confidence * 100).toFixed(0)}%` : ''}
+                  </span>
+                )}
+              </div>
+              {agent.reasoning && (
+                <div className="mt-1 text-[11px] leading-relaxed text-secondary-text">{agent.reasoning}</div>
+              )}
+              {(agent.evidence.length > 0 || agent.risks.length > 0 || agent.invalidation.length > 0) && (
+                <div className="mt-1.5 grid gap-1 text-[10px] leading-relaxed text-muted-text">
+                  {agent.evidence.slice(0, 2).map((item) => (
+                    <div key={`ev-${agent.agentName}-${item}`}><span className="text-emerald-400">证据</span> {item}</div>
+                  ))}
+                  {agent.risks.slice(0, 2).map((item) => (
+                    <div key={`risk-${agent.agentName}-${item}`}><span className="text-red-400">风险</span> {item}</div>
+                  ))}
+                  {agent.invalidation.slice(0, 1).map((item) => (
+                    <div key={`inv-${agent.agentName}-${item}`}><span className="text-yellow-300">观察</span> {item}</div>
+                  ))}
+                </div>
+              )}
+              {!agent.reasoning && agent.thinking.length > 0 && (
+                <div className="mt-1 text-[10px] leading-relaxed text-muted-text">
+                  {agent.thinking[agent.thinking.length - 1]}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="research-path-timeline">
         {PHASES.map((phase, idx) => {

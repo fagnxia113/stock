@@ -165,6 +165,36 @@ def _is_non_retriable_tool_result(result: Any) -> bool:
     )
 
 
+def _compact_tool_result_for_log(tool_name: str, result_str: str) -> Optional[Dict[str, Any]]:
+    """Keep compact, structured tool results for downstream rule checks."""
+    if tool_name not in {
+        "get_realtime_quote",
+        "get_daily_history",
+        "analyze_trend",
+        "get_chip_distribution",
+        "get_stock_info",
+        "get_capital_flow",
+    }:
+        return None
+
+    try:
+        payload = json.loads(result_str)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    if tool_name == "get_daily_history":
+        compact = {k: v for k, v in payload.items() if k != "data"}
+        data = payload.get("data")
+        if isinstance(data, list) and data:
+            compact["latest_record"] = data[-1]
+            compact["data_points"] = len(data)
+        return compact
+
+    return payload
+
+
 def parse_dashboard_json(content: str) -> Optional[Dict[str, Any]]:
     """Extract and parse a Decision Dashboard JSON from agent text.
 
@@ -538,6 +568,7 @@ def run_agent_loop(
                 tool_calls_log,
                 non_retriable_tool_results,
                 tool_wait_timeout_seconds=effective_tool_timeout,
+                labels=labels,
             )
 
             # Append tool results preserving original call order
@@ -620,11 +651,13 @@ def _execute_tools(
     tool_calls_log: List[Dict[str, Any]],
     non_retriable_tool_results: Optional[Dict[str, str]] = None,
     tool_wait_timeout_seconds: Optional[float] = None,
+    labels: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Execute one or more tool calls, returning ordered result dicts.
 
     Single tools run inline; multiple tools run in parallel threads.
     """
+    labels = labels or _THINKING_TOOL_LABELS
 
     def _exec_single(tc_item):
         t0 = time.time()
@@ -657,7 +690,13 @@ def _execute_tools(
     if len(tool_calls) == 1:
         tc = tool_calls[0]
         if progress_callback:
-            progress_callback({"type": "tool_start", "step": step, "tool": tc.name, "display_name": labels.get(tc.name, tc.name)})
+            progress_callback({
+                "type": "tool_start",
+                "step": step,
+                "tool": tc.name,
+                "arguments": tc.arguments,
+                "display_name": labels.get(tc.name, tc.name),
+            })
         timeout_triggered = False
         if tool_wait_timeout_seconds and tool_wait_timeout_seconds > 0:
             pool = ThreadPoolExecutor(max_workers=1)
@@ -689,6 +728,9 @@ def _execute_tools(
             "success": success, "duration": dur, "result_length": len(result_str),
             "cached": cached,
         }
+        compact_result = _compact_tool_result_for_log(tc.name, result_str)
+        if compact_result is not None:
+            log_entry["result"] = compact_result
         if tool_wait_timeout_seconds and tool_wait_timeout_seconds > 0 and not success:
             try:
                 if json.loads(result_str).get("timeout") is True:
@@ -700,7 +742,13 @@ def _execute_tools(
     else:
         for tc in tool_calls:
             if progress_callback:
-                progress_callback({"type": "tool_start", "step": step, "tool": tc.name, "display_name": labels.get(tc.name, tc.name)})
+                progress_callback({
+                    "type": "tool_start",
+                    "step": step,
+                    "tool": tc.name,
+                    "arguments": tc.arguments,
+                    "display_name": labels.get(tc.name, tc.name),
+                })
 
         pool = ThreadPoolExecutor(max_workers=min(len(tool_calls), 5))
         timeout_triggered = False
@@ -715,11 +763,15 @@ def _execute_tools(
                 tc_item, result_str, success, dur, cached = future.result()
                 if progress_callback:
                     progress_callback({"type": "tool_done", "step": step, "tool": tc_item.name, "success": success, "duration": dur, "display_name": labels.get(tc_item.name, tc_item.name)})
-                tool_calls_log.append({
+                log_entry = {
                     "step": step, "tool": tc_item.name, "arguments": tc_item.arguments,
                     "success": success, "duration": dur, "result_length": len(result_str),
                     "cached": cached,
-                })
+                }
+                compact_result = _compact_tool_result_for_log(tc_item.name, result_str)
+                if compact_result is not None:
+                    log_entry["result"] = compact_result
+                tool_calls_log.append(log_entry)
                 results.append({"tc": tc_item, "result_str": result_str})
         except FuturesTimeoutError:
             timeout_triggered = True

@@ -16,6 +16,11 @@ from typing import Optional
 from src.agent.agents.base_agent import BaseAgent
 from src.agent.protocols import AgentContext, AgentOpinion
 from src.agent.runner import try_parse_json
+from src.agent.schemas import (
+    TechnicalOpinionPayload,
+    append_evidence_pool,
+    validate_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +60,12 @@ output a structured JSON opinion.
 3. Analyse volume and chip distribution
 4. Identify chart patterns
 
+## Anti-Hallucination Rules
+- Realtime quote and recent OHLCV data override your memory or prior market knowledge.
+- If realtime quote is unavailable or stale, explicitly lower confidence and avoid strong_buy.
+- Every bullish/bearish claim must cite a concrete price, volume, MA, turnover, chip, or pattern fact.
+- Do not invent current price, support, resistance, stop-loss, or volume figures.
+
 {baseline}
 {skills}
 ## Output Format
@@ -63,6 +74,14 @@ Return **only** a JSON object (no markdown fences):
   "signal": "strong_buy|buy|hold|sell|strong_sell",
   "confidence": 0.0-1.0,
   "reasoning": "2-3 sentence summary",
+  "evidence": ["hard technical evidence, not generic claims"],
+  "risks": ["technical invalidation risks"],
+  "invalid_if": ["conditions that would invalidate this technical view"],
+  "action_triggers": {{
+    "entry": "price/volume condition for entry, or wait condition",
+    "add": "condition for adding position",
+    "reduce": "condition for reducing position"
+  }},
   "key_levels": {{
     "support": <float>,
     "resistance": <float>,
@@ -88,6 +107,8 @@ Return **only** a JSON object (no markdown fences):
         if parsed is None:
             logger.warning("[TechnicalAgent] failed to parse opinion JSON")
             return None
+        parsed = validate_payload(TechnicalOpinionPayload, parsed)
+        append_evidence_pool(ctx, agent_name=self.agent_name, payload=parsed)
 
         return AgentOpinion(
             agent_name=self.agent_name,

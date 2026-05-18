@@ -15,7 +15,18 @@ export interface ProgressStep {
   type: string;
   step?: number;
   tool?: string;
+  tool_name?: string;
+  agent_name?: string;
+  stage?: string;
+  status?: string;
   display_name?: string;
+  signal?: string;
+  confidence?: number;
+  reasoning?: string;
+  raw_data?: Record<string, unknown>;
+  thinking?: string;
+  result_summary?: string;
+  arguments?: Record<string, unknown>;
   success?: boolean;
   duration?: number;
   message?: string;

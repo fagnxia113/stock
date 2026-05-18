@@ -17,6 +17,11 @@ from typing import Optional
 from src.agent.agents.base_agent import BaseAgent
 from src.agent.protocols import AgentContext, AgentOpinion
 from src.agent.runner import try_parse_json
+from src.agent.schemas import (
+    IntelOpinionPayload,
+    append_evidence_pool,
+    validate_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +73,11 @@ Return **only** a JSON object:
   "signal": "strong_buy|buy|hold|sell|strong_sell",
   "confidence": 0.0-1.0,
   "reasoning": "2-3 sentence summary of news/sentiment/capital-flow findings",
+  "evidence": ["specific news/capital-flow/announcement evidence"],
   "risk_alerts": ["list", "of", "detected", "risks"],
   "positive_catalysts": ["list", "of", "catalysts"],
+  "contradictory_evidence": ["evidence that weakens the bullish or bearish thesis"],
+  "watch_items": ["what to monitor next"],
   "sentiment_label": "very_positive|positive|neutral|negative|very_negative",
   "capital_flow_signal": "inflow|outflow|neutral|not_available",
   "key_news": [
@@ -97,6 +105,8 @@ Return **only** a JSON object:
         if parsed is None:
             logger.warning("[IntelAgent] failed to parse opinion JSON")
             return None
+        parsed = validate_payload(IntelOpinionPayload, parsed)
+        append_evidence_pool(ctx, agent_name=self.agent_name, payload=parsed)
 
         # Cache parsed intel so downstream agents (especially RiskAgent) can
         # reuse it instead of re-searching the same evidence.

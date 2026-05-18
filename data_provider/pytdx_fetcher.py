@@ -20,7 +20,7 @@ import time
 import glob as glob_mod
 from configparser import ConfigParser
 from contextlib import contextmanager
-from typing import Optional, Generator, List, Tuple
+from typing import Optional, Generator, List, Tuple, Dict
 
 import pandas as pd
 from tenacity import (
@@ -36,6 +36,22 @@ import os
 import sys
 
 logger = logging.getLogger(__name__)
+
+
+def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
 
 _TDX_COMMON_INSTALL_DIRS: List[str] = []
 if sys.platform == "win32":
@@ -219,6 +235,20 @@ class PytdxFetcher(BaseFetcher):
         self._current_host_idx = 0
         self._stock_list_cache = None
         self._stock_name_cache = {}
+        self._host_cooldown_until: Dict[int, float] = {}
+        self._host_failures: Dict[int, int] = {}
+        self._connect_timeout = _env_float("PYTDX_CONNECT_TIMEOUT", 1.2, minimum=0.2, maximum=5.0)
+        self._server_cooldown = _env_float("PYTDX_SERVER_COOLDOWN", 120.0, minimum=0.0, maximum=1800.0)
+        self._max_connect_hosts = _env_int(
+            "PYTDX_MAX_CONNECT_HOSTS",
+            3,
+            minimum=1,
+            maximum=max(1, len(self._hosts)),
+        )
+        self._reuse_connection = (
+            os.getenv("PYTDX_REUSE_CONNECTION", "true").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
     
     def _get_pytdx(self):
         """
@@ -232,6 +262,28 @@ class PytdxFetcher(BaseFetcher):
         except ImportError:
             logger.warning("pytdx 未安装，请运行: pip install pytdx")
             return None
+
+    def _ordered_host_indices(self) -> List[int]:
+        if not self._hosts:
+            return []
+        total = len(self._hosts)
+        indices = [(self._current_host_idx + i) % total for i in range(total)]
+        now = time.monotonic()
+        active = [idx for idx in indices if self._host_cooldown_until.get(idx, 0.0) <= now]
+        cooling = [idx for idx in indices if idx not in active]
+        return active + cooling
+
+    def _record_host_success(self, host_idx: int) -> None:
+        self._current_host_idx = host_idx
+        self._host_failures.pop(host_idx, None)
+        self._host_cooldown_until.pop(host_idx, None)
+
+    def _record_host_failure(self, host_idx: int) -> None:
+        failures = self._host_failures.get(host_idx, 0) + 1
+        self._host_failures[host_idx] = failures
+        if self._server_cooldown > 0:
+            cooldown = min(self._server_cooldown * failures, self._server_cooldown * 3)
+            self._host_cooldown_until[host_idx] = time.monotonic() + cooldown
     
     @contextmanager
     def _pytdx_session(self) -> Generator:
@@ -256,17 +308,24 @@ class PytdxFetcher(BaseFetcher):
         
         try:
             # 尝试连接服务器（自动选择最优）
+            attempted = 0
             for i in range(len(self._hosts)):
-                host_idx = (self._current_host_idx + i) % len(self._hosts)
+                ordered_hosts = self._ordered_host_indices()
+                if i >= len(ordered_hosts) or attempted >= self._max_connect_hosts:
+                    break
+                attempted += 1
+                host_idx = ordered_hosts[i]
                 host, port = self._hosts[host_idx]
                 
                 try:
-                    if api.connect(host, port, time_out=5):
+                    if api.connect(host, port, time_out=self._connect_timeout):
                         connected = True
-                        self._current_host_idx = host_idx
+                        self._record_host_success(host_idx)
                         logger.debug(f"Pytdx 连接成功: {host}:{port}")
                         break
+                    self._record_host_failure(host_idx)
                 except Exception as e:
+                    self._record_host_failure(host_idx)
                     logger.debug(f"Pytdx 连接 {host}:{port} 失败: {e}")
                     continue
             

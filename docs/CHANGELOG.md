@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] `StockTrendAnalyzer` 评分系统 A 股增强：新增涨跌停距离评分维度（5 分），RSI 权重从 10 分调至 5 分；支持科创板/创业板 ±20%、ST ±5%、北交所 ±30% 差异化涨跌幅适配。
 - [改进] LLM Prompt 注入 A 股政策敏感度指引：A 股分析自动追加政策权重、行业政策联动、板块轮动意识、涨停板文化等分析要点。
 - [改进] A 股市场策略蓝图扩展：新增「政策与资金」分析维度，涵盖降准降息/两融余额/新基金发行/行业政策催化；进攻/防守框架融入政策面因子。
+- [文档] 精简 README 为项目入口页，新增中文文档索引，集中导航部署、模型、通知、Bot 与开发文档。
+- [改进] 打通 Agent 聊天流与多 Agent 事件总线，聊天研究路径可展示各专业 Agent 的实时阶段观点、工具调用和置信度。
+- [改进] 强化专业投研 Agent 输出协议，要求技术、情报、风控与决策阶段输出证据、反证、失效条件、操作触发与观察清单。
+- [改进] 新增 Agent 结构化输出 schema 与 evidence pool，统一沉淀各专业 Agent 的证据、风险、反证、失效条件和观察项，供最终决策与前端展示复用。
+
+- [improvement] Add a rule-based decision policy layer that scores prior agent opinions, evidence pool items, contradictions, invalidation conditions, and risk vetoes before the final DecisionAgent writes the dashboard.
+- [改进] 新增 Agent 数据可信度评分，实时行情、K 线、趋势、筹码、基本面与资金流工具返回统一携带 `data_quality`，供决策层按来源、新鲜度和完整度加权。
+- [改进] 新增最终 dashboard 幻觉闸门：实时行情缺失时自动压制买入信号，并复核当前价、止损/止盈等价格位与实时价格是否冲突。
 
 ## [3.15.0] - 2026-05-05
 
